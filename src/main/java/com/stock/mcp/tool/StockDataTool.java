@@ -161,7 +161,10 @@ public class StockDataTool {
                         StockMarketData data = stockApiService.fetchStockMarketDataWithProfit(stockCode);
                         if (data == null) {
                             result.put("success", false);
-                            result.put("message", "未获取到行情数据: " + stockCode);
+                            // 仅 A 股纳入持仓盈亏，美股请用 getQuote 单独查行情
+                            result.put("message",
+                                    "未获取到持仓盈亏数据: " + stockCode
+                                            + "（仅 A 股持仓参与盈亏汇总；若是美股/港股，请改用 getQuote 工具查询行情）");
                         } else {
                             result.put("success", true);
                             result.put("marketData", marketDataToMap(data));
@@ -172,7 +175,9 @@ public class StockDataTool {
                     }
                     return result;
                 })
-                .description("获取单只股票的实时行情数据（含盈亏计算）。输入: {stockCode}")
+                .description("获取单只 A 股持仓的实时行情数据（含盈亏计算）。"
+                        + "仅支持 A 股持仓，美股/港股行情请用 getQuote 工具。"
+                        + "输入: {stockCode}")
                 .inputType(Map.class)
                 .build();
     }
