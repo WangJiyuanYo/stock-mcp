@@ -11,7 +11,7 @@ spring:
         sse-message-endpoint: /mcp/message
 
   datasource:
-    url: jdbc:sqlite:/root/stock_dir/db/stock.db
+    url: jdbc:sqlite:${STOCK_DB_PATH:./data/stock.db}
     driver-class-name: org.sqlite.JDBC
   sql:
     init:
