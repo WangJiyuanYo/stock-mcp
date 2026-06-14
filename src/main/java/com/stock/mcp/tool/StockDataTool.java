@@ -3,6 +3,7 @@ package com.stock.mcp.tool;
 import com.stock.mcp.api.StockApiService;
 import com.stock.mcp.model.Stock;
 import com.stock.mcp.model.StockMarketData;
+import com.stock.mcp.model.StockQuote;
 import com.stock.mcp.service.StockService;
 import org.springframework.ai.tool.function.FunctionToolCallback;
 import org.springframework.context.annotation.Bean;
@@ -17,9 +18,9 @@ public class StockDataTool {
     private final StockService stockService;
     private final StockApiService stockApiService;
 
-    public StockDataTool(StockService stockService) {
+    public StockDataTool(StockService stockService, StockApiService stockApiService) {
         this.stockService = stockService;
-        this.stockApiService = new StockApiService(stockService);
+        this.stockApiService = stockApiService;
     }
 
     @Bean
@@ -266,7 +267,61 @@ public class StockDataTool {
                 .build();
     }
 
+    @Bean
+    public FunctionToolCallback<Map<String, Object>, Map<String, Object>> getQuote() {
+        return FunctionToolCallback
+                .builder("getQuote", (Map<String, Object> input) -> {
+                    String stockCode = (String) input.get("stockCode");
+                    Map<String, Object> result = new LinkedHashMap<>();
+                    if (stockCode == null || stockCode.trim().isEmpty()) {
+                        result.put("success", false);
+                        result.put("message", "stockCode 不能为空");
+                        return result;
+                    }
+                    try {
+                        StockQuote quote = stockApiService.fetchQuote(stockCode.trim());
+                        if (quote == null) {
+                            result.put("success", false);
+                            result.put("message", "未获取到行情数据: " + stockCode);
+                        } else {
+                            result.put("success", true);
+                            result.put("quote", quoteToMap(quote));
+                        }
+                    } catch (IllegalArgumentException e) {
+                        result.put("success", false);
+                        result.put("message", e.getMessage());
+                    } catch (Exception e) {
+                        result.put("success", false);
+                        result.put("message", "获取行情失败: " + e.getMessage());
+                    }
+                    return result;
+                })
+                .description("获取股票最新行情（价格 + 涨跌幅），自动识别 A股 / 美股。"
+                        + "输入: {stockCode} 例: \"600000\"（A股）或 \"SPCX\"（美股）")
+                .inputType(Map.class)
+                .build();
+    }
+
     // ---- helper methods ----
+
+    private Map<String, Object> quoteToMap(StockQuote q) {
+        Map<String, Object> map = new LinkedHashMap<>();
+        map.put("symbol", q.getSymbol());
+        map.put("formattedCode", q.getFormattedCode());
+        map.put("name", q.getName());
+        map.put("market", q.getMarket());
+        map.put("price", q.getPrice());
+        map.put("previousClose", q.getPreviousClose());
+        map.put("changeAmount", q.getChangeAmount());
+        map.put("changePercent", q.getChangePercent());
+        map.put("open", q.getOpen());
+        map.put("high", q.getHigh());
+        map.put("low", q.getLow());
+        map.put("date", q.getDate());
+        map.put("time", q.getTime());
+        return map;
+    }
+
 
     private Map<String, Object> stockToMap(Stock s) {
         Map<String, Object> map = new LinkedHashMap<>();

@@ -1,8 +1,11 @@
 package com.stock.mcp.api;
 
+import com.stock.mcp.api.strategy.MarketQuoteStrategy;
 import com.stock.mcp.model.Stock;
 import com.stock.mcp.model.StockMarketData;
+import com.stock.mcp.model.StockQuote;
 import com.stock.mcp.service.StockService;
+import org.springframework.stereotype.Service;
 
 import java.io.IOException;
 import java.math.BigDecimal;
@@ -10,21 +13,51 @@ import java.net.URI;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
+import java.nio.charset.Charset;
 import java.util.ArrayList;
 import java.util.List;
 
+@Service
 public class StockApiService {
 
     private static final String API_URL = "https://hq.sinajs.cn/list=";
+    /** 新浪 hq 接口的中文名是 GBK 编码（A股/港股中文名、美股中文别名都受影响） */
+    private static final Charset SINA_CHARSET = Charset.forName("GBK");
     private final HttpClient httpClient;
     private final StockService stockService;
+    private final QuoteStrategyRegistry strategyRegistry;
 
-    public StockApiService(StockService stockService) {
+    public StockApiService(StockService stockService, QuoteStrategyRegistry strategyRegistry) {
         this.stockService = stockService;
+        this.strategyRegistry = strategyRegistry;
         this.httpClient = HttpClient.newBuilder()
                 .version(HttpClient.Version.HTTP_1_1)
                 .build();
     }
+
+    // ============ 通用行情查询（策略派发，跨市场） ============
+
+    /**
+     * 查询任意市场单只股票的行情（精简版，不含持仓盈亏）
+     * 自动按代码格式识别 A股 / 美股 / ...
+     */
+    public StockQuote fetchQuote(String code) throws IOException {
+        if (code == null || code.trim().isEmpty()) return null;
+
+        MarketQuoteStrategy strategy = strategyRegistry.pick(code);
+        String formatted = strategy.formatSymbol(code);
+        String body = httpGet(API_URL + formatted);
+
+        for (String line : body.split("\n")) {
+            if (!line.contains("=")) continue;
+            ParsedLine pl = splitLine(line);
+            if (pl == null) continue;
+            return strategy.parse(pl.codeWithPrefix, pl.fields);
+        }
+        return null;
+    }
+
+    // ============ 以下为现有 A 股 + 持仓盈亏路径，保持不动 ============
 
     public List<StockMarketData> fetchAllStockMarketDataWithProfit() throws IOException {
         List<Stock> allStocks = stockService.getAllStocks();
@@ -76,27 +109,8 @@ public class StockApiService {
 
         String codesParam = String.join(",", stockCodes);
         String fullUrl = buildStockUrl(codesParam);
-
-        try {
-            HttpRequest request = HttpRequest.newBuilder()
-                    .uri(URI.create(fullUrl))
-                    .header("Referer", "http://finance.sina.com.cn/")
-                    .header("Accept", "*/*")
-                    .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
-                    .GET()
-                    .build();
-
-            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
-
-            if (response.statusCode() == 200) {
-                return parseStockData(response.body(), stockCodes);
-            } else {
-                throw new IOException("API 请求失败，状态码: " + response.statusCode());
-            }
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            throw new IOException("请求被中断", e);
-        }
+        String body = httpGet(fullUrl);
+        return parseStockData(body, stockCodes);
     }
 
     private void mergeHoldingInfo(List<StockMarketData> marketDataList, List<Stock> allStocks) {
@@ -182,20 +196,12 @@ public class StockApiService {
 
     private StockMarketData parseSingleStock(String line) {
         try {
-            int eqIndex = line.indexOf("=");
-            int quoteStart = line.indexOf("\"", eqIndex);
-            int quoteEnd = line.lastIndexOf("\"");
-
-            if (eqIndex == -1 || quoteStart == -1 || quoteEnd == -1) return null;
-
-            String stockCodeWithPrefix = line.substring(0, eqIndex).replace("var hq_str_", "").trim();
-            String dataPart = line.substring(quoteStart + 1, quoteEnd);
-            String[] fields = dataPart.split(",");
-
-            if (fields.length < 32) return null;
+            ParsedLine pl = splitLine(line);
+            if (pl == null || pl.fields.length < 32) return null;
+            String[] fields = pl.fields;
 
             StockMarketData data = new StockMarketData();
-            data.setStockCode(stockCodeWithPrefix);
+            data.setStockCode(pl.codeWithPrefix);
             data.setName(fields[0]);
             data.setTodayOpen(parseBigDecimal(fields[1]));
             data.setYesterdayClose(parseBigDecimal(fields[2]));
@@ -235,6 +241,42 @@ public class StockApiService {
         }
     }
 
+    // ============ 公共底层工具 ============
+
+    /** 把 'var hq_str_xxx="a,b,c,..";' 一行拆成 (codeWithPrefix, fields[]) */
+    private static ParsedLine splitLine(String line) {
+        int eqIndex = line.indexOf("=");
+        int quoteStart = line.indexOf("\"", eqIndex);
+        int quoteEnd = line.lastIndexOf("\"");
+        if (eqIndex == -1 || quoteStart == -1 || quoteEnd == -1 || quoteEnd <= quoteStart) return null;
+
+        String codeWithPrefix = line.substring(0, eqIndex).replace("var hq_str_", "").trim();
+        String dataPart = line.substring(quoteStart + 1, quoteEnd);
+        return new ParsedLine(codeWithPrefix, dataPart.split(","));
+    }
+
+    private String httpGet(String url) throws IOException {
+        try {
+            HttpRequest request = HttpRequest.newBuilder()
+                    .uri(URI.create(url))
+                    .header("Referer", "http://finance.sina.com.cn/")
+                    .header("Accept", "*/*")
+                    .header("Accept-Language", "zh-CN,zh;q=0.9,en;q=0.8")
+                    .GET()
+                    .build();
+
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString(SINA_CHARSET));
+
+            if (response.statusCode() != 200) {
+                throw new IOException("API 请求失败，状态码: " + response.statusCode());
+            }
+            return response.body();
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IOException("请求被中断", e);
+        }
+    }
+
     private BigDecimal parseBigDecimal(String value) {
         try {
             if (value == null || value.trim().isEmpty() || "0".equals(value.trim())) return null;
@@ -250,6 +292,15 @@ public class StockApiService {
             return Long.parseLong(value.trim());
         } catch (Exception e) {
             return null;
+        }
+    }
+
+    private static final class ParsedLine {
+        final String codeWithPrefix;
+        final String[] fields;
+        ParsedLine(String codeWithPrefix, String[] fields) {
+            this.codeWithPrefix = codeWithPrefix;
+            this.fields = fields;
         }
     }
 }
